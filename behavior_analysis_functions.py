@@ -5,7 +5,16 @@ import numpy.random as npr
 import matplotlib.pyplot as plt
 import scipy.io
 
-class DataAnalysis:
+import tensorflow as tf 
+from keras.layers import Dense, LSTM, BatchNormalization, Bidirectional
+from keras.models import Sequential
+from keras.optimizers import Adam
+from keras.callbacks import ReduceLROnPlateau, EarlyStopping
+from keras.regularizers import l2
+from tensorflow.keras import regularizers
+
+
+class BehaviorAnalysis:
     def __init__(self):
         pass
 
@@ -14,9 +23,50 @@ class DataAnalysis:
             return arr.tolist()
         return {name: self.structured_array_to_dict(arr[name]) for name in arr.dtype.names}
 
-    def convert_dataCell_to_dict(self, mat_data):
-        dataCell_list = [self.structured_array_to_dict(mat_data['dataCell'][0, i][0, 0]) for i in range(mat_data['dataCell'].shape[1])]
+    def convert_dataCell_to_dict(self, mat_Cell_data):
+        dataCell_list = [self.structured_array_to_dict(mat_Cell_data['dataCell'][0, i][0, 0]) for i in range(mat_Cell_data['dataCell'].shape[1])]
         return dataCell_list
+    
+    def convert_mov_data_to_dict(self, mat_data, dataCell_list):
+        # Extract y-position data
+        y_position = mat_data['data'][2]
+
+        # Identify transitions from ~300 to 0 as trial end points
+        trial_end_indices = np.where((y_position[:-1] > 250) & (y_position[1:] < 50))[0]
+
+        # Verify the number of trials
+        number_of_identified_trials = len(trial_end_indices)
+        number_of_trials_in_dataCell = len(dataCell_list)
+
+        number_of_identified_trials, number_of_trials_in_dataCell
+
+        # Segment the data based on trial end indices to define data_segments
+        data_segments = []
+        start_idx = 0
+        for end_idx in trial_end_indices:
+            segment = mat_data['data'][:, start_idx:end_idx+1]
+            data_segments.append(segment)
+            start_idx = end_idx + 1
+
+        # Find the length of the longest trial for padding
+        max_trial_length = max([segment.shape[1] for segment in data_segments])
+
+        # Pad each trial segment with NaN values to match the length of the longest trial
+        padded_data_segments = []
+        for segment in data_segments:
+            padding_length = max_trial_length - segment.shape[1]
+            padded_segment = np.pad(segment, ((0, 0), (0, padding_length)), constant_values=np.nan)
+            padded_data_segments.append(padded_segment)
+
+        # Convert the list of padded segments into a 3D numpy array
+        padded_data_matrix_3D = np.stack(padded_data_segments, axis=0)
+
+        keys = ["time", "x-position", "y-position", "view angle", "x velocity", "y velocity", "current world", "reward", "iti"]
+
+        # Create the dictionary with specified keys and 2D matrices for each feature
+        mov_data_list = {key: padded_data_matrix_3D[:, idx, :] for idx, key in enumerate(keys)}
+
+        return mov_data_list
 
     def get_perc_correct_all_conditions(self, dataCell_list):
         correct_values = [int(entry['result']['correct'][0][0][0]) for entry in dataCell_list]
@@ -75,6 +125,7 @@ class DataAnalysis:
             ax1.plot([i-1, i], [smoothed_values[i-start_idx-1], smoothed_values[i-start_idx]], color=color, label='_nolegend_')
         legend_labels = ["V-rel", "A-rel"]
         legend_colors = ["red", "blue"]
+        ax1.axhline(y=0.7, color='black', linestyle='--', linewidth=1)
         markers = [plt.Line2D([0,0], [0,0], color=color, marker='o', linestyle='') for color in legend_colors]
         ax1.legend(markers, legend_labels, numpoints=1)
         ax1.set_title("Running Mean of Correct Choices")
@@ -99,3 +150,48 @@ class DataAnalysis:
         ax2.set_yticklabels(['0','1'])
         plt.tight_layout()
         plt.show()
+
+class LSTM_dynamic_choice:
+    def __init__(self):
+        pass
+
+    def prepare_data_for_LSTM(self, mov_data_list, correct_labels, desired_length):
+        # Prepare the input data
+        X = np.stack([mov_data_list['x-position'], mov_data_list['y-position'], mov_data_list['x velocity'], 
+                    mov_data_list['y velocity'], mov_data_list['view angle']], axis=2)
+
+        # Use the 'Correct' column as the target (reported choice)
+        y = np.array(correct_labels)
+
+        X_cleaned = [trial[~np.isnan(trial).any(axis=1)] for trial in X]
+
+        # Apply linear subsampling to each trial
+        X_subsampled = [LSTM_dynamic_choice.linear_subsample(trial, desired_length) for trial in X_cleaned]
+
+        # Convert list of arrays into a 3D numpy array
+        X_subsampled_array = np.stack(X_subsampled, axis=1)
+
+        # Correctly replicate the y labels for each of the 200 subsampled time points
+        y_repeated = np.tile(y.reshape(1, -1), (desired_length, 1))
+
+        return X_subsampled_array, y_repeated
+    
+    def linear_subsample(trial_data, desired_length):
+        
+        trial_length = trial_data.shape[0]
+        
+        if trial_length <= desired_length:
+            return trial_data
+        else:
+            # Select 200 evenly spaced indices from the trial data
+            indices = np.linspace(0, trial_length-1, desired_length).astype(int)
+            return trial_data[indices]
+
+    def lstm_model(self, input_shape, regularization=0.01):
+        model = Sequential()
+        model.add(Bidirectional(LSTM(10, input_shape=input_shape, return_sequences=True)))
+        model.add(Dense(1, activation='sigmoid'))
+        model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=.01), metrics=['accuracy'])
+        return model
+    
+
